@@ -1,0 +1,2520 @@
+---
+title: 'Project 1: What do markets like to hear?'
+author: "Ken Chew (kc3040)"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+*** 
+### Introduction
+
+After President Trump's inauguration, we witnessed the Dow Jones reaching a historic high of 20,000 on the 27th of January - they often say that the stock market is a measure of the public's sentiment. People usually try to take hints on the President's long term direction for the country from his acceptance and inauguration speech, and thus it is no surprise that inauguration speeches can affect the optimism that people have of market conditions. However, what I realized is that most written analyses of the speeches on various forms of media are qualitative in nature. Through this project, I hope to bring a different spin to this story.
+
+
+Using a quantifiable metric, the stock market indices, I tried to measure people's reaction to what was said by the various presidents in the form of closing price. By tracking the stock prices of the various indices before and after the inaugurations from 1985, we classify speeches which are considered market friendly or not. Subsequently, we conduct various forms of data and sentiment analysis to try pick out things which "the markets like to hear".
+
+
+```{r, message = F, warning = F, echo = F}
+#setwd("C:/Users/samsung/ADS/Spr2017-Proj1-kenkcchew/doc")
+packages.used=c("rvest", "tibble", "qdap", 
+                "sentimentr", "gplots", "dplyr",
+                "tm", "syuzhet", "factoextra", 
+                "beeswarm", "scales", "RColorBrewer",
+                "RANN", "tm", "topicmodels",
+                "wordcloud", "tidytext", "shiny", 
+                "reshape2", "pracma", "knitr", "formattable",
+                "httpuv", "caTools")
+
+# check packages that need to be installed
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install additional packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE, repos = "http://cran.us.r-project.org")
+}
+
+
+# load packages
+library("rvest")
+library("tibble")
+library("qdap")
+library("sentimentr")
+library("gplots")
+library("dplyr")
+library("tm")
+library("syuzhet")
+library("factoextra")
+library("beeswarm")
+library("scales")
+library("RColorBrewer")
+library("RANN")
+library("topicmodels")
+library("wordcloud")
+library("tidytext")
+library("shiny")
+library("reshape2")
+library("pracma")
+library("knitr")
+library("formattable")
+library("httpuv")
+library("caTools")
+
+source("../lib/plotstacked.R")
+source("../lib/speechFuncs.R")
+```
+
+
+
+
+```{r, message = F, warning = F, echo = F, error = F}
+# download and process speeches info's txt file
+
+# Building FullName with format FirstMLast for details on inauguration speeches
+speeches_date <- read.table(file = "../data/InauguationDates.txt", sep = "\t", header = T)
+colnames(speeches_date)[2:5] <- c(1:4)
+speeches_date<- melt(speeches_date, id.vars = "PRESIDENT", value.name = "Date", variable.name = "Term")
+speeches_date <- speeches_date[which(speeches_date$Date != ""), ]
+
+# convert dates to Date format 
+speech_dates_vec <- t(sapply(strsplit(as.character(speeches_date$Date), "/", fixed = T), '['))
+speeches_date$Date <- as.Date( paste(speech_dates_vec[, 3], speech_dates_vec[, 1], speech_dates_vec[, 2], sep = "." )  , format = "%Y.%m.%d" )
+speeches_date <- speeches_date[order(speeches_date$Date),]
+
+
+
+FirstName <- sapply(strsplit(as.character(speeches_date$PRESIDENT), " ", fixed = T), '[', 1)
+MiddleLastName <- sapply(strsplit(as.character(speeches_date$PRESIDENT), " ", fixed = T), '[', -1)
+LastName <- list()
+M <- list()
+
+for (i in 1:length(MiddleLastName)) {
+  if (length(MiddleLastName[i][[1]]) == 1) {
+    LastName[i] <- MiddleLastName[i][[1]]
+    M[i] <- ""
+  } else{
+    LastName[i] <- MiddleLastName[i][[1]][2]
+    M[i] <- substring(MiddleLastName[i][[1]][1], 1, 1)
+  }
+}
+
+speeches_date$NameTerm <- paste0(FirstName, M, LastName, "-", speeches_date$Term)
+
+speeches_date$FileName <- paste0("inaug", FirstName, M, LastName, "-", speeches_date$Term, ".txt")
+
+
+# Creating date min/max ranges for analysis later
+speeches_date$DateMinus7 <- speeches_date$Date - 7
+speeches_date$DateMinus15 <- speeches_date$Date - 15
+#speeches_date$DateMinus30 <- speeches_date$Date - 30
+speeches_date$DatePlus7 <- speeches_date$Date + 7
+speeches_date$DatePlus15 <- speeches_date$Date + 15
+#speeches_date$DatePlus30 <- speeches_date$Date + 30
+```
+
+```{r, echo = F}
+# Step 1b: Download and process speeches
+# 
+# For the speeches, we remove extra white space, convert all letters to the lower case, remove stop wrods, removed empty words due to formatting errors, and remove punctuation. Then we compute the [Document-Term Matrix (DTM)](https://en.wikipedia.org/wiki/Document-term_matrix). 
+
+# download speeches text
+folder.path="../data/InauguralSpeeches/Subset"
+speeches=list.files(path = folder.path, pattern = "*.txt")
+prex.out=substr(speeches, 6, nchar(speeches)-4)
+SpeechCorpus <-Corpus(DirSource(folder.path))
+
+speeches_shortened <- sub("inaug", "", speeches)
+speeches_shortened <- sub(".txt", "", speeches_shortened)
+
+
+SpeechCorpus<-tm_map(SpeechCorpus, stripWhitespace)
+SpeechCorpus<-tm_map(SpeechCorpus, content_transformer(tolower))
+SpeechCorpus<-tm_map(SpeechCorpus, removeWords, stopwords("english"))
+SpeechCorpus<-tm_map(SpeechCorpus, removeNumbers)
+SpeechCorpus<-tm_map(SpeechCorpus, removePunctuation)
+
+
+SpeechCorpus.up <- SpeechCorpus[c(1, 3, 4, 5, 8)]
+SpeechCorpus.down <- SpeechCorpus[-c(1, 3, 4, 5, 8)]
+
+# Compute term-document matrix by count of words
+tdm.up <- TermDocumentMatrix(SpeechCorpus.up)
+tdm.down <- TermDocumentMatrix(SpeechCorpus.down)
+
+# this has speeches by inauguration
+tdm.tidy.up <- tidy(tdm.up)
+tdm.tidy.down <- tidy(tdm.down)
+
+
+# remove .txt and inaug from speeches name
+docNames <- tdm.tidy.up$document 
+docNames <- sub("inaug", "", docNames)
+docNames <- sub(".txt", "", docNames)
+tdm.tidy.up$document <- docNames 
+
+docNames <- tdm.tidy.down$document 
+docNames <- sub("inaug", "", docNames)
+docNames <- sub(".txt", "", docNames)
+tdm.tidy.down$document <- docNames 
+
+tdm.overall.up <- summarise(group_by(tdm.tidy.up, term), sum(count))
+tdm.overall.down <- summarise(group_by(tdm.tidy.down, term), sum(count))
+
+
+# #Step 4 - compute TF-IDF weighted document-term matrices for individual speeches. 
+# As we would like to identify interesting words for each inaugural speech, we use [TF-IDF](https://en.wikipedia.org/wiki/Tf%E2%80%93idf) to weigh each term within each speech. It highlights terms that are more specific for a particular speech. 
+
+
+# Compute TF-IDF weighted document-term matrices for individual speeches
+dtm.up <- DocumentTermMatrix(SpeechCorpus.up,
+                          control = list(weighting = function(x)
+                                             weightTfIdf(x, 
+                                                         normalize =FALSE),
+                                         stopwords = TRUE))
+
+dtm.down <- DocumentTermMatrix(SpeechCorpus.down,
+                          control = list(weighting = function(x)
+                                             weightTfIdf(x, 
+                                                         normalize =FALSE),
+                                         stopwords = TRUE))
+SpeechCorpus.dtm.up <- tidy(dtm.up)
+SpeechCorpus.dtm.down <- tidy(dtm.down)
+
+
+# remove .txt and inaug from speeches name
+docNames <- SpeechCorpus.dtm.up$document 
+docNames <- sub("inaug", "", docNames)
+docNames <- sub(".txt", "", docNames)
+SpeechCorpus.dtm.up$document <- docNames 
+
+docNames <- SpeechCorpus.dtm.down$document 
+docNames <- sub("inaug", "", docNames)
+docNames <- sub(".txt", "", docNames)
+SpeechCorpus.dtm.down$document <- docNames 
+
+
+speeches_up <- speeches_shortened[c(1, 3, 4, 5, 8)]
+speeches_down <- speeches_shortened[-c(1, 3, 4, 5, 8)]
+
+```
+
+
+```{r, echo = F}
+# Read speeches into speech_list for sentiment analysis
+speech1=paste(readLines("../data/InauguralSpeeches/Subset/inaugBarackObama-1.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech2=paste(readLines("../data/InauguralSpeeches/Subset/inaugBarackObama-2.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech3=paste(readLines("../data/InauguralSpeeches/Subset/inaugDonaldJTrump-1.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech4=paste(readLines("../data/InauguralSpeeches/Subset/inaugGeorgeBush-1.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech5=paste(readLines("../data/InauguralSpeeches/Subset/inaugGeorgeWBush-1.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech6=paste(readLines("../data/InauguralSpeeches/Subset/inaugGeorgeWBush-2.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech7=paste(readLines("../data/InauguralSpeeches/Subset/inaugRonaldReagan-2.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech8=paste(readLines("../data/InauguralSpeeches/Subset/inaugWilliamJClinton-1.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+speech9=paste(readLines("../data/InauguralSpeeches/Subset/inaugWilliamJClinton-2.txt", 
+                         n=-1, skipNul=TRUE), collapse=" ")
+
+speech_up = data.frame(NameTerm = speeches_up, 
+                       fulltext = c(speech1, speech3, speech4, speech5, speech8))
+speech_down = data.frame(NameTerm = speeches_down, 
+                       fulltext = c(speech2, speech6, speech7, speech9))
+```
+
+
+
+```{r, echo = F, message = F, error = F}
+# Step 2: Download and process financial data
+# download financial datasets
+dowjones <- read.csv("../data/Financial/dji_level_data.csv")
+snp500 <- read.csv("../data/Financial/YAHOO-INDEX_GSPC.csv")
+hangseng <- read.csv("../data/Financial/YAHOO-INDEX_HSI.csv")
+nasdaq <- read.csv("../data/Financial/YAHOO-INDEX_IXIC.csv")
+nikkei <- read.csv("../data/Financial/YAHOO-INDEX_N225.csv")
+nyse <- read.csv("../data/Financial/YAHOO-INDEX_NYA.csv")
+ftse <- read.csv("../data/Financial/ftse_level_data.csv")
+
+indicesList <- list(dowjones = dowjones, 
+                    snp500 = snp500, 
+                    hangseng = hangseng, 
+                    nasdaq = nasdaq, 
+                    nikkei = nikkei, 
+                    nyse = nyse, 
+                    ftse = ftse)
+
+indicesList <- lapply(indicesList, as.data.frame)
+indicesList <- lapply(indicesList, subset, select = 1:5)
+
+indexColnames <- c("Date", "Open", "High", "Low", "Close")
+list2env(lapply(indicesList, setNames, indexColnames), .GlobalEnv)
+
+dowjones$Date <- as.Date(dowjones$Date, "%Y-%m-%d")
+snp500$Date <- as.Date(snp500$Date, "%Y-%m-%d")
+hangseng$Date <- as.Date(hangseng$Date, "%Y-%m-%d")
+nasdaq$Date <- as.Date(nasdaq$Date, "%Y-%m-%d")
+nikkei$Date <- as.Date(nikkei$Date, "%Y-%m-%d")
+nyse$Date <- as.Date(nyse$Date, "%Y-%m-%d")
+ftse$Date <- as.Date(ftse$Date, "%Y-%m-%d")
+
+```
+
+***
+### Examining Trump's Inauguration 
+
+Taking President Trump as our first example, I looked at the reaction of the Dow Jones (DJIA) 15 days before and after the inauguration speech. Notice that I also added a best fit line of the before and after data points, so as to compare the gradient. Comparison of gradient is important as the stock market has momentum generally. We are interested in not only the average of clusters of closing prices before and after as it might be skewed by the ongoing trend in the market. 
+
+One interesting observation is that there is generally a change in the gradient right after inauguration speech (and this is consistent throughout all the president inauguration speeches being examined) - signaling that there is a market reaction to the speeches made by the newly minted president. In this case, we see that the gradient of DJIA increased after the speech. This is seen as a market friendly signal, and corroborates with impression that people have of his "business friendly policies".
+
+
+```{r, tidy=T}
+# Abstracting relevant dates for Trump1
+DonaldJTrump1.Date <- speeches_date$Date[which(speeches_date$NameTerm == "DonaldJTrump-1")]
+DonaldJTrump1.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "DonaldJTrump-1")]
+DonaldJTrump1.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "DonaldJTrump-1")]
+
+DonaldJTrump1.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "DonaldJTrump-1")]
+DonaldJTrump1.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "DonaldJTrump-1")]
+
+# Subsetting stock index data to period relevant for Trump1
+DonaldJTrump1.dowjones <- subset(dowjones, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.dowjones$Group <- DonaldJTrump1.dowjones$Date >= DonaldJTrump1.Date
+
+DonaldJTrump1.snp500 <- subset(snp500, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.snp500$Group <- DonaldJTrump1.snp500$Date >= DonaldJTrump1.Date
+
+DonaldJTrump1.nasdaq <- subset(nasdaq, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.nasdaq$Group <- DonaldJTrump1.nasdaq$Date >= DonaldJTrump1.Date
+
+DonaldJTrump1.nyse <- subset(nyse, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.nyse$Group <- DonaldJTrump1.nyse$Date >= DonaldJTrump1.Date
+
+DonaldJTrump1.ftse <- subset(ftse, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.ftse$Group <- DonaldJTrump1.ftse$Date >= DonaldJTrump1.Date
+
+DonaldJTrump1.nikkei <- subset(nikkei, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.nikkei$Group <- DonaldJTrump1.nikkei$Date >= DonaldJTrump1.Date
+
+DonaldJTrump1.hangseng <- subset(hangseng, Date >= DonaldJTrump1.DateMinus15 & Date <= DonaldJTrump1.DatePlus15)
+DonaldJTrump1.hangseng$Group <- DonaldJTrump1.hangseng$Date >= DonaldJTrump1.Date
+
+# Calculate DJIA gradient
+DonaldJTrump1.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.dowjones, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.dowjones, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.dowjonesGradChange15 <- (coef(DonaldJTrump1.dowjonesPostGrad15)["Date"] - coef(DonaldJTrump1.dowjonesPreGrad15)["Date"])/abs(coef(DonaldJTrump1.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+DonaldJTrump1.snp500PreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.snp500, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.snp500PostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.snp500, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.snp500GradChange15 <- (coef(DonaldJTrump1.snp500PostGrad15)["Date"] - coef(DonaldJTrump1.snp500PreGrad15)["Date"])/abs(coef(DonaldJTrump1.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+DonaldJTrump1.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.nasdaq, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.nasdaq, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.nasdaqGradChange15 <- (coef(DonaldJTrump1.nasdaqPostGrad15)["Date"] - coef(DonaldJTrump1.nasdaqPreGrad15)["Date"])/abs(coef(DonaldJTrump1.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+DonaldJTrump1.nysePreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.nyse, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.nysePostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.nyse, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.nyseGradChange15 <- (coef(DonaldJTrump1.nysePostGrad15)["Date"] - coef(DonaldJTrump1.nysePreGrad15)["Date"])/abs(coef(DonaldJTrump1.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+DonaldJTrump1.ftsePreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.ftse, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.ftsePostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.ftse, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.ftseGradChange15 <- (coef(DonaldJTrump1.ftsePostGrad15)["Date"] - coef(DonaldJTrump1.ftsePreGrad15)["Date"])/abs(coef(DonaldJTrump1.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+DonaldJTrump1.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.hangseng, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.hangseng, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.hangsengGradChange15 <- (coef(DonaldJTrump1.hangsengPostGrad15)["Date"] - coef(DonaldJTrump1.hangsengPreGrad15)["Date"])/abs(coef(DonaldJTrump1.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+DonaldJTrump1.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.nikkei, Date >= DonaldJTrump1.DateMinus15 & Date < DonaldJTrump1.Date))
+DonaldJTrump1.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(DonaldJTrump1.nikkei, Date >= DonaldJTrump1.Date & Date <= DonaldJTrump1.DatePlus15))
+
+DonaldJTrump1.nikkeiGradChange15 <- (coef(DonaldJTrump1.nikkeiPostGrad15)["Date"] - coef(DonaldJTrump1.nikkeiPreGrad15)["Date"])/abs(coef(DonaldJTrump1.nikkeiPreGrad15)["Date"])
+
+# Plot Trump1 DJIA +- 15 days after inauguration
+DonaldJTrump1.dowjones.plot <- 
+  ggplot(DonaldJTrump1.dowjones[which(DonaldJTrump1.dowjones$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.dowjones$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Trump1 SNP500 +- 15 days after inauguration
+DonaldJTrump1.snp500.plot <- 
+  ggplot(DonaldJTrump1.snp500[which(DonaldJTrump1.snp500$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.snp500$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Trump1 nasdaq +- 15 days after inauguration
+DonaldJTrump1.nasdaq.plot <- 
+  ggplot(DonaldJTrump1.nasdaq[which(DonaldJTrump1.nasdaq$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.nasdaq$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Trump1 NYSE +- 15 days after inauguration
+DonaldJTrump1.nyse.plot <- 
+  ggplot(DonaldJTrump1.nyse[which(DonaldJTrump1.nyse$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.nyse$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Trump1 FTSE +- 15 days after inauguration
+DonaldJTrump1.ftse.plot <- 
+  ggplot(DonaldJTrump1.ftse[which(DonaldJTrump1.ftse$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.ftse$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Trump1 Nikkei +- 15 days after inauguration
+DonaldJTrump1.nikkei.plot <- 
+  ggplot(DonaldJTrump1.nikkei[which(DonaldJTrump1.nikkei$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.nikkei$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Trump1 Hangseng +- 15 days after inauguration
+DonaldJTrump1.hangseng.plot <- 
+  ggplot(DonaldJTrump1.hangseng[which(DonaldJTrump1.hangseng$Date >= (DonaldJTrump1.Date - 15) & DonaldJTrump1.hangseng$Date <= (DonaldJTrump1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Trump1 Inauguration") + geom_smooth(data=subset(DonaldJTrump1.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(DonaldJTrump1.Date), col = "black", size = 1, linetype=4)
+
+DonaldJTrump1.dowjones.plot
+
+```
+
+To ensure that we are not looking at only 1 index and making premature conclusions, I thus did the same analysis on all other major indices: S&P500, Nasdaq, NYSE. Of course, major indices are not limited to only the US ones, and thus I did the same for the FTSE, Hang Seng and Nikkei indices to get a good geographical spread across the continents.
+
+```{r, tidy=T}
+DonaldJTrump1.snp500.plot
+DonaldJTrump1.nasdaq.plot
+DonaldJTrump1.nyse.plot
+```
+
+
+We see from the charts that the directionality of change amongst US indices is consistent - which means most US investors think that Trump's inauguration speech gave them optimism. The Asian indices showed some discrepancy: the Hang Seng index did only exception is Hang Seng - this could be due to the axing of the TPP as a promise by President Trump.
+```{r, tidy=T}
+DonaldJTrump1.ftse.plot
+DonaldJTrump1.hangseng.plot
+DonaldJTrump1.nikkei.plot
+
+
+
+# All Gradient Changes
+DonaldJTrump1.GradChangeVec <- c(DonaldJTrump1.dowjonesGradChange15, 
+                              DonaldJTrump1.snp500GradChange15,
+                              DonaldJTrump1.nasdaqGradChange15,
+                              DonaldJTrump1.nyseGradChange15,
+                              DonaldJTrump1.ftseGradChange15,
+                              DonaldJTrump1.hangsengGradChange15,
+                              DonaldJTrump1.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                 "FTSE", "Hang Seng", "Nikkei")
+
+DonaldJTrump1.GradChangeDF <- data.frame(President = c("DonaldJTrump-1", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(DonaldJTrump1.GradChangeVec))
+
+
+formattable(DonaldJTrump1.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "DonaldJTrump-1", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+```
+
+Conducting the same analysis for all the Presidents, we summarize the results in the following tables showing the change in gradient after the inauguration speeches. From these tables, we categorize the inauguration speeches into those which are market lifting and market dampening.
+
+```{r, echo = F}
+# Abstracting relevant dates for Obama2
+BarackObama2.Date <- speeches_date$Date[which(speeches_date$NameTerm == "BarackObama-2")]
+BarackObama2.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "BarackObama-2")]
+BarackObama2.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "BarackObama-2")]
+
+BarackObama2.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "BarackObama-2")]
+BarackObama2.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "BarackObama-2")]
+
+# Subsetting stock index data to period relevant for Obama2
+BarackObama2.dowjones <- subset(dowjones, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.dowjones$Group <- BarackObama2.dowjones$Date >= BarackObama2.Date
+
+BarackObama2.snp500 <- subset(snp500, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.snp500$Group <- BarackObama2.snp500$Date >= BarackObama2.Date
+
+BarackObama2.nasdaq <- subset(nasdaq, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.nasdaq$Group <- BarackObama2.nasdaq$Date >= BarackObama2.Date
+
+BarackObama2.nyse <- subset(nyse, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.nyse$Group <- BarackObama2.nyse$Date >= BarackObama2.Date
+
+BarackObama2.ftse <- subset(ftse, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.ftse$Group <- BarackObama2.ftse$Date >= BarackObama2.Date
+
+BarackObama2.nikkei <- subset(nikkei, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.nikkei$Group <- BarackObama2.nikkei$Date >= BarackObama2.Date
+
+BarackObama2.hangseng <- subset(hangseng, Date >= BarackObama2.DateMinus15 & Date <= BarackObama2.DatePlus15)
+BarackObama2.hangseng$Group <- BarackObama2.hangseng$Date >= BarackObama2.Date
+
+# Calculate DJIA gradient
+BarackObama2.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.dowjones, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.dowjones, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.dowjonesGradChange15 <- (coef(BarackObama2.dowjonesPostGrad15)["Date"] - coef(BarackObama2.dowjonesPreGrad15)["Date"])/abs(coef(BarackObama2.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+BarackObama2.snp500PreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.snp500, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.snp500PostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.snp500, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.snp500GradChange15 <- (coef(BarackObama2.snp500PostGrad15)["Date"] - coef(BarackObama2.snp500PreGrad15)["Date"])/abs(coef(BarackObama2.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+BarackObama2.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.nasdaq, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.nasdaq, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.nasdaqGradChange15 <- (coef(BarackObama2.nasdaqPostGrad15)["Date"] - coef(BarackObama2.nasdaqPreGrad15)["Date"])/abs(coef(BarackObama2.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+BarackObama2.nysePreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.nyse, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.nysePostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.nyse, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.nyseGradChange15 <- (coef(BarackObama2.nysePostGrad15)["Date"] - coef(BarackObama2.nysePreGrad15)["Date"])/abs(coef(BarackObama2.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+BarackObama2.ftsePreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.ftse, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.ftsePostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.ftse, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.ftseGradChange15 <- (coef(BarackObama2.ftsePostGrad15)["Date"] - coef(BarackObama2.ftsePreGrad15)["Date"])/abs(coef(BarackObama2.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+BarackObama2.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.hangseng, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.hangseng, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.hangsengGradChange15 <- (coef(BarackObama2.hangsengPostGrad15)["Date"] - coef(BarackObama2.hangsengPreGrad15)["Date"])/abs(coef(BarackObama2.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+BarackObama2.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.nikkei, Date >= BarackObama2.DateMinus15 & Date < BarackObama2.Date))
+BarackObama2.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama2.nikkei, Date >= BarackObama2.Date & Date <= BarackObama2.DatePlus15))
+
+BarackObama2.nikkeiGradChange15 <- (coef(BarackObama2.nikkeiPostGrad15)["Date"] - coef(BarackObama2.nikkeiPreGrad15)["Date"])/abs(coef(BarackObama2.nikkeiPreGrad15)["Date"])
+
+# Plot Obama2 DJIA +- 15 days after inauguration
+BarackObama2.dowjones.plot <- 
+  ggplot(BarackObama2.dowjones[which(BarackObama2.dowjones$Date >= (BarackObama2.Date - 15) & BarackObama2.dowjones$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama2 SNP500 +- 15 days after inauguration
+BarackObama2.snp500.plot <- 
+  ggplot(BarackObama2.snp500[which(BarackObama2.snp500$Date >= (BarackObama2.Date - 15) & BarackObama2.snp500$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama2 nasdaq +- 15 days after inauguration
+BarackObama2.nasdaq.plot <- 
+  ggplot(BarackObama2.nasdaq[which(BarackObama2.nasdaq$Date >= (BarackObama2.Date - 15) & BarackObama2.nasdaq$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama2 NYSE +- 15 days after inauguration
+BarackObama2.nyse.plot <- 
+  ggplot(BarackObama2.nyse[which(BarackObama2.nyse$Date >= (BarackObama2.Date - 15) & BarackObama2.nyse$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama2 FTSE +- 15 days after inauguration
+BarackObama2.ftse.plot <- 
+  ggplot(BarackObama2.ftse[which(BarackObama2.ftse$Date >= (BarackObama2.Date - 15) & BarackObama2.ftse$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama2 Nikkei +- 15 days after inauguration
+BarackObama2.nikkei.plot <- 
+  ggplot(BarackObama2.nikkei[which(BarackObama2.nikkei$Date >= (BarackObama2.Date - 15) & BarackObama2.nikkei$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama2 Hangseng +- 15 days after inauguration
+BarackObama2.hangseng.plot <- 
+  ggplot(BarackObama2.hangseng[which(BarackObama2.hangseng$Date >= (BarackObama2.Date - 15) & BarackObama2.hangseng$Date <= (BarackObama2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Obama2 Inauguration") + geom_smooth(data=subset(BarackObama2.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama2.Date), col = "black", size = 1, linetype=4)
+
+BarackObama2.dowjones.plot
+BarackObama2.snp500.plot
+BarackObama2.nasdaq.plot
+BarackObama2.nyse.plot
+
+BarackObama2.ftse.plot
+BarackObama2.hangseng.plot
+BarackObama2.nikkei.plot
+
+# All Gradient Changes
+BarackObama2.GradChangeVec <- c(BarackObama2.dowjonesGradChange15, 
+                                 BarackObama2.snp500GradChange15,
+                                 BarackObama2.nasdaqGradChange15,
+                                 BarackObama2.nyseGradChange15,
+                                 BarackObama2.ftseGradChange15,
+                                 BarackObama2.hangsengGradChange15,
+                                 BarackObama2.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+BarackObama2.GradChangeDF <- data.frame(President = c("BarackObama-2", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(BarackObama2.GradChangeVec))
+
+
+formattable(BarackObama2.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "BarackObama-2", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for Reagan2
+RonaldReagan2.Date <- speeches_date$Date[which(speeches_date$NameTerm == "RonaldReagan-2")]
+RonaldReagan2.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "RonaldReagan-2")]
+RonaldReagan2.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "RonaldReagan-2")]
+
+RonaldReagan2.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "RonaldReagan-2")]
+RonaldReagan2.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "RonaldReagan-2")]
+
+# Subsetting stock index data to period relevant for Reagan2
+RonaldReagan2.dowjones <- subset(dowjones, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.dowjones$Group <- RonaldReagan2.dowjones$Date >= RonaldReagan2.Date
+
+RonaldReagan2.snp500 <- subset(snp500, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.snp500$Group <- RonaldReagan2.snp500$Date >= RonaldReagan2.Date
+
+RonaldReagan2.nasdaq <- subset(nasdaq, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.nasdaq$Group <- RonaldReagan2.nasdaq$Date >= RonaldReagan2.Date
+
+RonaldReagan2.nyse <- subset(nyse, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.nyse$Group <- RonaldReagan2.nyse$Date >= RonaldReagan2.Date
+
+RonaldReagan2.ftse <- subset(ftse, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.ftse$Group <- RonaldReagan2.ftse$Date >= RonaldReagan2.Date
+
+RonaldReagan2.nikkei <- subset(nikkei, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.nikkei$Group <- RonaldReagan2.nikkei$Date >= RonaldReagan2.Date
+
+RonaldReagan2.hangseng <- subset(hangseng, Date >= RonaldReagan2.DateMinus15 & Date <= RonaldReagan2.DatePlus15)
+RonaldReagan2.hangseng$Group <- RonaldReagan2.hangseng$Date >= RonaldReagan2.Date
+
+# Calculate DJIA gradient
+RonaldReagan2.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.dowjones, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.dowjones, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.dowjonesGradChange15 <- (coef(RonaldReagan2.dowjonesPostGrad15)["Date"] - coef(RonaldReagan2.dowjonesPreGrad15)["Date"])/abs(coef(RonaldReagan2.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+RonaldReagan2.snp500PreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.snp500, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.snp500PostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.snp500, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.snp500GradChange15 <- (coef(RonaldReagan2.snp500PostGrad15)["Date"] - coef(RonaldReagan2.snp500PreGrad15)["Date"])/abs(coef(RonaldReagan2.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+RonaldReagan2.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.nasdaq, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.nasdaq, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.nasdaqGradChange15 <- (coef(RonaldReagan2.nasdaqPostGrad15)["Date"] - coef(RonaldReagan2.nasdaqPreGrad15)["Date"])/abs(coef(RonaldReagan2.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+RonaldReagan2.nysePreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.nyse, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.nysePostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.nyse, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.nyseGradChange15 <- (coef(RonaldReagan2.nysePostGrad15)["Date"] - coef(RonaldReagan2.nysePreGrad15)["Date"])/abs(coef(RonaldReagan2.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+RonaldReagan2.ftsePreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.ftse, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.ftsePostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.ftse, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.ftseGradChange15 <- (coef(RonaldReagan2.ftsePostGrad15)["Date"] - coef(RonaldReagan2.ftsePreGrad15)["Date"])/abs(coef(RonaldReagan2.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+RonaldReagan2.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.hangseng, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.hangseng, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.hangsengGradChange15 <- (coef(RonaldReagan2.hangsengPostGrad15)["Date"] - coef(RonaldReagan2.hangsengPreGrad15)["Date"])/abs(coef(RonaldReagan2.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+RonaldReagan2.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.nikkei, Date >= RonaldReagan2.DateMinus15 & Date < RonaldReagan2.Date))
+RonaldReagan2.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(RonaldReagan2.nikkei, Date >= RonaldReagan2.Date & Date <= RonaldReagan2.DatePlus15))
+
+RonaldReagan2.nikkeiGradChange15 <- (coef(RonaldReagan2.nikkeiPostGrad15)["Date"] - coef(RonaldReagan2.nikkeiPreGrad15)["Date"])/abs(coef(RonaldReagan2.nikkeiPreGrad15)["Date"])
+
+# Plot Reagan2 DJIA +- 15 days after inauguration
+RonaldReagan2.dowjones.plot <- 
+  ggplot(RonaldReagan2.dowjones[which(RonaldReagan2.dowjones$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.dowjones$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Reagan2 SNP500 +- 15 days after inauguration
+RonaldReagan2.snp500.plot <- 
+  ggplot(RonaldReagan2.snp500[which(RonaldReagan2.snp500$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.snp500$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Reagan2 nasdaq +- 15 days after inauguration
+RonaldReagan2.nasdaq.plot <- 
+  ggplot(RonaldReagan2.nasdaq[which(RonaldReagan2.nasdaq$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.nasdaq$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Reagan2 NYSE +- 15 days after inauguration
+RonaldReagan2.nyse.plot <- 
+  ggplot(RonaldReagan2.nyse[which(RonaldReagan2.nyse$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.nyse$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Reagan2 FTSE +- 15 days after inauguration
+RonaldReagan2.ftse.plot <- 
+  ggplot(RonaldReagan2.ftse[which(RonaldReagan2.ftse$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.ftse$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Reagan2 Nikkei +- 15 days after inauguration
+RonaldReagan2.nikkei.plot <- 
+  ggplot(RonaldReagan2.nikkei[which(RonaldReagan2.nikkei$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.nikkei$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Reagan2 Hangseng +- 15 days after inauguration
+RonaldReagan2.hangseng.plot <- 
+  ggplot(RonaldReagan2.hangseng[which(RonaldReagan2.hangseng$Date >= (RonaldReagan2.Date - 15) & RonaldReagan2.hangseng$Date <= (RonaldReagan2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Reagan2 Inauguration") + geom_smooth(data=subset(RonaldReagan2.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(RonaldReagan2.Date), col = "black", size = 1, linetype=4)
+
+RonaldReagan2.dowjones.plot
+RonaldReagan2.snp500.plot
+RonaldReagan2.nasdaq.plot
+RonaldReagan2.nyse.plot
+
+RonaldReagan2.ftse.plot
+RonaldReagan2.hangseng.plot
+RonaldReagan2.nikkei.plot
+
+# All Gradient Changes
+RonaldReagan2.GradChangeVec <- c(RonaldReagan2.dowjonesGradChange15, 
+                                 RonaldReagan2.snp500GradChange15,
+                                 RonaldReagan2.nasdaqGradChange15,
+                                 RonaldReagan2.nyseGradChange15,
+                                 RonaldReagan2.ftseGradChange15,
+                                 RonaldReagan2.hangsengGradChange15,
+                                 RonaldReagan2.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+RonaldReagan2.GradChangeDF <- data.frame(President = c("RonaldReagan-2", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(RonaldReagan2.GradChangeVec))
+
+
+formattable(RonaldReagan2.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "RonaldReagan-2", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+
+
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for Bush1
+GeorgeBush1.Date <- speeches_date$Date[which(speeches_date$NameTerm == "GeorgeBush-1")]
+GeorgeBush1.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "GeorgeBush-1")]
+GeorgeBush1.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "GeorgeBush-1")]
+
+GeorgeBush1.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "GeorgeBush-1")]
+GeorgeBush1.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "GeorgeBush-1")]
+
+# Subsetting stock index data to period relevant for Bush1
+GeorgeBush1.dowjones <- subset(dowjones, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.dowjones$Group <- GeorgeBush1.dowjones$Date >= GeorgeBush1.Date
+
+GeorgeBush1.snp500 <- subset(snp500, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.snp500$Group <- GeorgeBush1.snp500$Date >= GeorgeBush1.Date
+
+GeorgeBush1.nasdaq <- subset(nasdaq, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.nasdaq$Group <- GeorgeBush1.nasdaq$Date >= GeorgeBush1.Date
+
+GeorgeBush1.nyse <- subset(nyse, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.nyse$Group <- GeorgeBush1.nyse$Date >= GeorgeBush1.Date
+
+GeorgeBush1.ftse <- subset(ftse, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.ftse$Group <- GeorgeBush1.ftse$Date >= GeorgeBush1.Date
+
+GeorgeBush1.nikkei <- subset(nikkei, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.nikkei$Group <- GeorgeBush1.nikkei$Date >= GeorgeBush1.Date
+
+GeorgeBush1.hangseng <- subset(hangseng, Date >= GeorgeBush1.DateMinus15 & Date <= GeorgeBush1.DatePlus15)
+GeorgeBush1.hangseng$Group <- GeorgeBush1.hangseng$Date >= GeorgeBush1.Date
+
+# Calculate DJIA gradient
+GeorgeBush1.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.dowjones, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.dowjones, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.dowjonesGradChange15 <- (coef(GeorgeBush1.dowjonesPostGrad15)["Date"] - coef(GeorgeBush1.dowjonesPreGrad15)["Date"])/abs(coef(GeorgeBush1.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+GeorgeBush1.snp500PreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.snp500, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.snp500PostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.snp500, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.snp500GradChange15 <- (coef(GeorgeBush1.snp500PostGrad15)["Date"] - coef(GeorgeBush1.snp500PreGrad15)["Date"])/abs(coef(GeorgeBush1.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+GeorgeBush1.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.nasdaq, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.nasdaq, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.nasdaqGradChange15 <- (coef(GeorgeBush1.nasdaqPostGrad15)["Date"] - coef(GeorgeBush1.nasdaqPreGrad15)["Date"])/abs(coef(GeorgeBush1.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+GeorgeBush1.nysePreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.nyse, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.nysePostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.nyse, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.nyseGradChange15 <- (coef(GeorgeBush1.nysePostGrad15)["Date"] - coef(GeorgeBush1.nysePreGrad15)["Date"])/abs(coef(GeorgeBush1.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+GeorgeBush1.ftsePreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.ftse, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.ftsePostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.ftse, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.ftseGradChange15 <- (coef(GeorgeBush1.ftsePostGrad15)["Date"] - coef(GeorgeBush1.ftsePreGrad15)["Date"])/abs(coef(GeorgeBush1.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+GeorgeBush1.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.hangseng, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.hangseng, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.hangsengGradChange15 <- (coef(GeorgeBush1.hangsengPostGrad15)["Date"] - coef(GeorgeBush1.hangsengPreGrad15)["Date"])/abs(coef(GeorgeBush1.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+GeorgeBush1.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.nikkei, Date >= GeorgeBush1.DateMinus15 & Date < GeorgeBush1.Date))
+GeorgeBush1.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeBush1.nikkei, Date >= GeorgeBush1.Date & Date <= GeorgeBush1.DatePlus15))
+
+GeorgeBush1.nikkeiGradChange15 <- (coef(GeorgeBush1.nikkeiPostGrad15)["Date"] - coef(GeorgeBush1.nikkeiPreGrad15)["Date"])/abs(coef(GeorgeBush1.nikkeiPreGrad15)["Date"])
+
+# Plot Bush1 DJIA +- 15 days after inauguration
+GeorgeBush1.dowjones.plot <- 
+  ggplot(GeorgeBush1.dowjones[which(GeorgeBush1.dowjones$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.dowjones$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush1 SNP500 +- 15 days after inauguration
+GeorgeBush1.snp500.plot <- 
+  ggplot(GeorgeBush1.snp500[which(GeorgeBush1.snp500$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.snp500$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush1 nasdaq +- 15 days after inauguration
+GeorgeBush1.nasdaq.plot <- 
+  ggplot(GeorgeBush1.nasdaq[which(GeorgeBush1.nasdaq$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.nasdaq$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush1 NYSE +- 15 days after inauguration
+GeorgeBush1.nyse.plot <- 
+  ggplot(GeorgeBush1.nyse[which(GeorgeBush1.nyse$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.nyse$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush1 FTSE +- 15 days after inauguration
+GeorgeBush1.ftse.plot <- 
+  ggplot(GeorgeBush1.ftse[which(GeorgeBush1.ftse$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.ftse$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush1 Nikkei +- 15 days after inauguration
+GeorgeBush1.nikkei.plot <- 
+  ggplot(GeorgeBush1.nikkei[which(GeorgeBush1.nikkei$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.nikkei$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush1 Hangseng +- 15 days after inauguration
+GeorgeBush1.hangseng.plot <- 
+  ggplot(GeorgeBush1.hangseng[which(GeorgeBush1.hangseng$Date >= (GeorgeBush1.Date - 15) & GeorgeBush1.hangseng$Date <= (GeorgeBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Bush1 Inauguration") + geom_smooth(data=subset(GeorgeBush1.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeBush1.Date), col = "black", size = 1, linetype=4)
+
+GeorgeBush1.dowjones.plot
+GeorgeBush1.snp500.plot
+GeorgeBush1.nasdaq.plot
+GeorgeBush1.nyse.plot
+
+GeorgeBush1.ftse.plot
+GeorgeBush1.hangseng.plot
+GeorgeBush1.nikkei.plot
+
+# All Gradient Changes
+GeorgeBush1.GradChangeVec <- c(GeorgeBush1.dowjonesGradChange15, 
+                                 GeorgeBush1.snp500GradChange15,
+                                 GeorgeBush1.nasdaqGradChange15,
+                                 GeorgeBush1.nyseGradChange15,
+                                 GeorgeBush1.ftseGradChange15,
+                                 GeorgeBush1.hangsengGradChange15,
+                                 GeorgeBush1.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+GeorgeBush1.GradChangeDF <- data.frame(President = c("GeorgeBush-1", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(GeorgeBush1.GradChangeVec))
+
+
+formattable(GeorgeBush1.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "GeorgeBush-1", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for Clinton1
+WilliamJClinton1.Date <- speeches_date$Date[which(speeches_date$NameTerm == "WilliamJClinton-1")]
+WilliamJClinton1.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "WilliamJClinton-1")]
+WilliamJClinton1.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "WilliamJClinton-1")]
+
+WilliamJClinton1.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "WilliamJClinton-1")]
+WilliamJClinton1.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "WilliamJClinton-1")]
+
+# Subsetting stock index data to period relevant for Clinton1
+WilliamJClinton1.dowjones <- subset(dowjones, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.dowjones$Group <- WilliamJClinton1.dowjones$Date >= WilliamJClinton1.Date
+
+WilliamJClinton1.snp500 <- subset(snp500, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.snp500$Group <- WilliamJClinton1.snp500$Date >= WilliamJClinton1.Date
+
+WilliamJClinton1.nasdaq <- subset(nasdaq, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.nasdaq$Group <- WilliamJClinton1.nasdaq$Date >= WilliamJClinton1.Date
+
+WilliamJClinton1.nyse <- subset(nyse, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.nyse$Group <- WilliamJClinton1.nyse$Date >= WilliamJClinton1.Date
+
+WilliamJClinton1.ftse <- subset(ftse, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.ftse$Group <- WilliamJClinton1.ftse$Date >= WilliamJClinton1.Date
+
+WilliamJClinton1.nikkei <- subset(nikkei, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.nikkei$Group <- WilliamJClinton1.nikkei$Date >= WilliamJClinton1.Date
+
+WilliamJClinton1.hangseng <- subset(hangseng, Date >= WilliamJClinton1.DateMinus15 & Date <= WilliamJClinton1.DatePlus15)
+WilliamJClinton1.hangseng$Group <- WilliamJClinton1.hangseng$Date >= WilliamJClinton1.Date
+
+# Calculate DJIA gradient
+WilliamJClinton1.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.dowjones, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.dowjones, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.dowjonesGradChange15 <- (coef(WilliamJClinton1.dowjonesPostGrad15)["Date"] - coef(WilliamJClinton1.dowjonesPreGrad15)["Date"])/abs(coef(WilliamJClinton1.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+WilliamJClinton1.snp500PreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.snp500, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.snp500PostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.snp500, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.snp500GradChange15 <- (coef(WilliamJClinton1.snp500PostGrad15)["Date"] - coef(WilliamJClinton1.snp500PreGrad15)["Date"])/abs(coef(WilliamJClinton1.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+WilliamJClinton1.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.nasdaq, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.nasdaq, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.nasdaqGradChange15 <- (coef(WilliamJClinton1.nasdaqPostGrad15)["Date"] - coef(WilliamJClinton1.nasdaqPreGrad15)["Date"])/abs(coef(WilliamJClinton1.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+WilliamJClinton1.nysePreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.nyse, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.nysePostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.nyse, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.nyseGradChange15 <- (coef(WilliamJClinton1.nysePostGrad15)["Date"] - coef(WilliamJClinton1.nysePreGrad15)["Date"])/abs(coef(WilliamJClinton1.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+WilliamJClinton1.ftsePreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.ftse, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.ftsePostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.ftse, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.ftseGradChange15 <- (coef(WilliamJClinton1.ftsePostGrad15)["Date"] - coef(WilliamJClinton1.ftsePreGrad15)["Date"])/abs(coef(WilliamJClinton1.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+WilliamJClinton1.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.hangseng, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.hangseng, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.hangsengGradChange15 <- (coef(WilliamJClinton1.hangsengPostGrad15)["Date"] - coef(WilliamJClinton1.hangsengPreGrad15)["Date"])/abs(coef(WilliamJClinton1.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+WilliamJClinton1.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.nikkei, Date >= WilliamJClinton1.DateMinus15 & Date < WilliamJClinton1.Date))
+WilliamJClinton1.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton1.nikkei, Date >= WilliamJClinton1.Date & Date <= WilliamJClinton1.DatePlus15))
+
+WilliamJClinton1.nikkeiGradChange15 <- (coef(WilliamJClinton1.nikkeiPostGrad15)["Date"] - coef(WilliamJClinton1.nikkeiPreGrad15)["Date"])/abs(coef(WilliamJClinton1.nikkeiPreGrad15)["Date"])
+
+# Plot Clinton1 DJIA +- 15 days after inauguration
+WilliamJClinton1.dowjones.plot <- 
+  ggplot(WilliamJClinton1.dowjones[which(WilliamJClinton1.dowjones$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.dowjones$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton1 SNP500 +- 15 days after inauguration
+WilliamJClinton1.snp500.plot <- 
+  ggplot(WilliamJClinton1.snp500[which(WilliamJClinton1.snp500$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.snp500$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton1 nasdaq +- 15 days after inauguration
+WilliamJClinton1.nasdaq.plot <- 
+  ggplot(WilliamJClinton1.nasdaq[which(WilliamJClinton1.nasdaq$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.nasdaq$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton1 NYSE +- 15 days after inauguration
+WilliamJClinton1.nyse.plot <- 
+  ggplot(WilliamJClinton1.nyse[which(WilliamJClinton1.nyse$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.nyse$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton1 FTSE +- 15 days after inauguration
+WilliamJClinton1.ftse.plot <- 
+  ggplot(WilliamJClinton1.ftse[which(WilliamJClinton1.ftse$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.ftse$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton1 Nikkei +- 15 days after inauguration
+WilliamJClinton1.nikkei.plot <- 
+  ggplot(WilliamJClinton1.nikkei[which(WilliamJClinton1.nikkei$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.nikkei$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton1 Hangseng +- 15 days after inauguration
+WilliamJClinton1.hangseng.plot <- 
+  ggplot(WilliamJClinton1.hangseng[which(WilliamJClinton1.hangseng$Date >= (WilliamJClinton1.Date - 15) & WilliamJClinton1.hangseng$Date <= (WilliamJClinton1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Clinton1 Inauguration") + geom_smooth(data=subset(WilliamJClinton1.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton1.Date), col = "black", size = 1, linetype=4)
+
+WilliamJClinton1.dowjones.plot
+WilliamJClinton1.snp500.plot
+WilliamJClinton1.nasdaq.plot
+WilliamJClinton1.nyse.plot
+
+WilliamJClinton1.ftse.plot
+WilliamJClinton1.hangseng.plot
+WilliamJClinton1.nikkei.plot
+
+# All Gradient Changes
+WilliamJClinton1.GradChangeVec <- c(WilliamJClinton1.dowjonesGradChange15, 
+                                 WilliamJClinton1.snp500GradChange15,
+                                 WilliamJClinton1.nasdaqGradChange15,
+                                 WilliamJClinton1.nyseGradChange15,
+                                 WilliamJClinton1.ftseGradChange15,
+                                 WilliamJClinton1.hangsengGradChange15,
+                                 WilliamJClinton1.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+WilliamJClinton1.GradChangeDF <- data.frame(President = c("WilliamJClinton-1", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(WilliamJClinton1.GradChangeVec))
+
+
+formattable(WilliamJClinton1.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "WilliamJClinton-1", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for Clinton2
+WilliamJClinton2.Date <- speeches_date$Date[which(speeches_date$NameTerm == "WilliamJClinton-2")]
+WilliamJClinton2.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "WilliamJClinton-2")]
+WilliamJClinton2.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "WilliamJClinton-2")]
+
+WilliamJClinton2.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "WilliamJClinton-2")]
+WilliamJClinton2.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "WilliamJClinton-2")]
+
+# Subsetting stock index data to period relevant for Clinton2
+WilliamJClinton2.dowjones <- subset(dowjones, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.dowjones$Group <- WilliamJClinton2.dowjones$Date >= WilliamJClinton2.Date
+
+WilliamJClinton2.snp500 <- subset(snp500, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.snp500$Group <- WilliamJClinton2.snp500$Date >= WilliamJClinton2.Date
+
+WilliamJClinton2.nasdaq <- subset(nasdaq, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.nasdaq$Group <- WilliamJClinton2.nasdaq$Date >= WilliamJClinton2.Date
+
+WilliamJClinton2.nyse <- subset(nyse, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.nyse$Group <- WilliamJClinton2.nyse$Date >= WilliamJClinton2.Date
+
+WilliamJClinton2.ftse <- subset(ftse, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.ftse$Group <- WilliamJClinton2.ftse$Date >= WilliamJClinton2.Date
+
+WilliamJClinton2.nikkei <- subset(nikkei, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.nikkei$Group <- WilliamJClinton2.nikkei$Date >= WilliamJClinton2.Date
+
+WilliamJClinton2.hangseng <- subset(hangseng, Date >= WilliamJClinton2.DateMinus15 & Date <= WilliamJClinton2.DatePlus15)
+WilliamJClinton2.hangseng$Group <- WilliamJClinton2.hangseng$Date >= WilliamJClinton2.Date
+
+# Calculate DJIA gradient
+WilliamJClinton2.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.dowjones, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.dowjones, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.dowjonesGradChange15 <- (coef(WilliamJClinton2.dowjonesPostGrad15)["Date"] - coef(WilliamJClinton2.dowjonesPreGrad15)["Date"])/abs(coef(WilliamJClinton2.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+WilliamJClinton2.snp500PreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.snp500, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.snp500PostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.snp500, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.snp500GradChange15 <- (coef(WilliamJClinton2.snp500PostGrad15)["Date"] - coef(WilliamJClinton2.snp500PreGrad15)["Date"])/abs(coef(WilliamJClinton2.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+WilliamJClinton2.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.nasdaq, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.nasdaq, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.nasdaqGradChange15 <- (coef(WilliamJClinton2.nasdaqPostGrad15)["Date"] - coef(WilliamJClinton2.nasdaqPreGrad15)["Date"])/abs(coef(WilliamJClinton2.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+WilliamJClinton2.nysePreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.nyse, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.nysePostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.nyse, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.nyseGradChange15 <- (coef(WilliamJClinton2.nysePostGrad15)["Date"] - coef(WilliamJClinton2.nysePreGrad15)["Date"])/abs(coef(WilliamJClinton2.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+WilliamJClinton2.ftsePreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.ftse, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.ftsePostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.ftse, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.ftseGradChange15 <- (coef(WilliamJClinton2.ftsePostGrad15)["Date"] - coef(WilliamJClinton2.ftsePreGrad15)["Date"])/abs(coef(WilliamJClinton2.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+WilliamJClinton2.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.hangseng, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.hangseng, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.hangsengGradChange15 <- (coef(WilliamJClinton2.hangsengPostGrad15)["Date"] - coef(WilliamJClinton2.hangsengPreGrad15)["Date"])/abs(coef(WilliamJClinton2.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+WilliamJClinton2.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.nikkei, Date >= WilliamJClinton2.DateMinus15 & Date < WilliamJClinton2.Date))
+WilliamJClinton2.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(WilliamJClinton2.nikkei, Date >= WilliamJClinton2.Date & Date <= WilliamJClinton2.DatePlus15))
+
+WilliamJClinton2.nikkeiGradChange15 <- (coef(WilliamJClinton2.nikkeiPostGrad15)["Date"] - coef(WilliamJClinton2.nikkeiPreGrad15)["Date"])/abs(coef(WilliamJClinton2.nikkeiPreGrad15)["Date"])
+
+# Plot Clinton2 DJIA +- 15 days after inauguration
+WilliamJClinton2.dowjones.plot <- 
+  ggplot(WilliamJClinton2.dowjones[which(WilliamJClinton2.dowjones$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.dowjones$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton2 SNP500 +- 15 days after inauguration
+WilliamJClinton2.snp500.plot <- 
+  ggplot(WilliamJClinton2.snp500[which(WilliamJClinton2.snp500$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.snp500$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton2 nasdaq +- 15 days after inauguration
+WilliamJClinton2.nasdaq.plot <- 
+  ggplot(WilliamJClinton2.nasdaq[which(WilliamJClinton2.nasdaq$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.nasdaq$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton2 NYSE +- 15 days after inauguration
+WilliamJClinton2.nyse.plot <- 
+  ggplot(WilliamJClinton2.nyse[which(WilliamJClinton2.nyse$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.nyse$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton2 FTSE +- 15 days after inauguration
+WilliamJClinton2.ftse.plot <- 
+  ggplot(WilliamJClinton2.ftse[which(WilliamJClinton2.ftse$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.ftse$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton2 Nikkei +- 15 days after inauguration
+WilliamJClinton2.nikkei.plot <- 
+  ggplot(WilliamJClinton2.nikkei[which(WilliamJClinton2.nikkei$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.nikkei$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Clinton2 Hangseng +- 15 days after inauguration
+WilliamJClinton2.hangseng.plot <- 
+  ggplot(WilliamJClinton2.hangseng[which(WilliamJClinton2.hangseng$Date >= (WilliamJClinton2.Date - 15) & WilliamJClinton2.hangseng$Date <= (WilliamJClinton2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Clinton2 Inauguration") + geom_smooth(data=subset(WilliamJClinton2.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(WilliamJClinton2.Date), col = "black", size = 1, linetype=4)
+
+WilliamJClinton2.dowjones.plot
+WilliamJClinton2.snp500.plot
+WilliamJClinton2.nasdaq.plot
+WilliamJClinton2.nyse.plot
+
+WilliamJClinton2.ftse.plot
+WilliamJClinton2.hangseng.plot
+WilliamJClinton2.nikkei.plot
+
+# All Gradient Changes
+WilliamJClinton2.GradChangeVec <- c(WilliamJClinton2.dowjonesGradChange15, 
+                                 WilliamJClinton2.snp500GradChange15,
+                                 WilliamJClinton2.nasdaqGradChange15,
+                                 WilliamJClinton2.nyseGradChange15,
+                                 WilliamJClinton2.ftseGradChange15,
+                                 WilliamJClinton2.hangsengGradChange15,
+                                 WilliamJClinton2.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+WilliamJClinton2.GradChangeDF <- data.frame(President = c("WilliamJClinton-2", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(WilliamJClinton2.GradChangeVec))
+
+
+formattable(WilliamJClinton2.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "WilliamJClinton-2", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for G.W.Bush1
+GeorgeWBush1.Date <- speeches_date$Date[which(speeches_date$NameTerm == "GeorgeWBush-1")]
+GeorgeWBush1.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "GeorgeWBush-1")]
+GeorgeWBush1.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "GeorgeWBush-1")]
+
+GeorgeWBush1.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "GeorgeWBush-1")]
+GeorgeWBush1.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "GeorgeWBush-1")]
+
+# Subsetting stock index data to period relevant for G.W.Bush1
+GeorgeWBush1.dowjones <- subset(dowjones, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.dowjones$Group <- GeorgeWBush1.dowjones$Date >= GeorgeWBush1.Date
+
+GeorgeWBush1.snp500 <- subset(snp500, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.snp500$Group <- GeorgeWBush1.snp500$Date >= GeorgeWBush1.Date
+
+GeorgeWBush1.nasdaq <- subset(nasdaq, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.nasdaq$Group <- GeorgeWBush1.nasdaq$Date >= GeorgeWBush1.Date
+
+GeorgeWBush1.nyse <- subset(nyse, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.nyse$Group <- GeorgeWBush1.nyse$Date >= GeorgeWBush1.Date
+
+GeorgeWBush1.ftse <- subset(ftse, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.ftse$Group <- GeorgeWBush1.ftse$Date >= GeorgeWBush1.Date
+
+GeorgeWBush1.nikkei <- subset(nikkei, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.nikkei$Group <- GeorgeWBush1.nikkei$Date >= GeorgeWBush1.Date
+
+GeorgeWBush1.hangseng <- subset(hangseng, Date >= GeorgeWBush1.DateMinus15 & Date <= GeorgeWBush1.DatePlus15)
+GeorgeWBush1.hangseng$Group <- GeorgeWBush1.hangseng$Date >= GeorgeWBush1.Date
+
+# Calculate DJIA gradient
+GeorgeWBush1.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.dowjones, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.dowjones, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.dowjonesGradChange15 <- (coef(GeorgeWBush1.dowjonesPostGrad15)["Date"] - coef(GeorgeWBush1.dowjonesPreGrad15)["Date"])/abs(coef(GeorgeWBush1.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+GeorgeWBush1.snp500PreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.snp500, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.snp500PostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.snp500, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.snp500GradChange15 <- (coef(GeorgeWBush1.snp500PostGrad15)["Date"] - coef(GeorgeWBush1.snp500PreGrad15)["Date"])/abs(coef(GeorgeWBush1.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+GeorgeWBush1.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.nasdaq, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.nasdaq, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.nasdaqGradChange15 <- (coef(GeorgeWBush1.nasdaqPostGrad15)["Date"] - coef(GeorgeWBush1.nasdaqPreGrad15)["Date"])/abs(coef(GeorgeWBush1.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+GeorgeWBush1.nysePreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.nyse, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.nysePostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.nyse, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.nyseGradChange15 <- (coef(GeorgeWBush1.nysePostGrad15)["Date"] - coef(GeorgeWBush1.nysePreGrad15)["Date"])/abs(coef(GeorgeWBush1.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+GeorgeWBush1.ftsePreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.ftse, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.ftsePostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.ftse, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.ftseGradChange15 <- (coef(GeorgeWBush1.ftsePostGrad15)["Date"] - coef(GeorgeWBush1.ftsePreGrad15)["Date"])/abs(coef(GeorgeWBush1.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+GeorgeWBush1.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.hangseng, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.hangseng, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.hangsengGradChange15 <- (coef(GeorgeWBush1.hangsengPostGrad15)["Date"] - coef(GeorgeWBush1.hangsengPreGrad15)["Date"])/abs(coef(GeorgeWBush1.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+GeorgeWBush1.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.nikkei, Date >= GeorgeWBush1.DateMinus15 & Date < GeorgeWBush1.Date))
+GeorgeWBush1.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush1.nikkei, Date >= GeorgeWBush1.Date & Date <= GeorgeWBush1.DatePlus15))
+
+GeorgeWBush1.nikkeiGradChange15 <- (coef(GeorgeWBush1.nikkeiPostGrad15)["Date"] - coef(GeorgeWBush1.nikkeiPreGrad15)["Date"])/abs(coef(GeorgeWBush1.nikkeiPreGrad15)["Date"])
+
+# Plot G.W.Bush1 DJIA +- 15 days after inauguration
+GeorgeWBush1.dowjones.plot <- 
+  ggplot(GeorgeWBush1.dowjones[which(GeorgeWBush1.dowjones$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.dowjones$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot G.W.Bush1 SNP500 +- 15 days after inauguration
+GeorgeWBush1.snp500.plot <- 
+  ggplot(GeorgeWBush1.snp500[which(GeorgeWBush1.snp500$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.snp500$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot G.W.Bush1 nasdaq +- 15 days after inauguration
+GeorgeWBush1.nasdaq.plot <- 
+  ggplot(GeorgeWBush1.nasdaq[which(GeorgeWBush1.nasdaq$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.nasdaq$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot G.W.Bush1 NYSE +- 15 days after inauguration
+GeorgeWBush1.nyse.plot <- 
+  ggplot(GeorgeWBush1.nyse[which(GeorgeWBush1.nyse$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.nyse$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot G.W.Bush1 FTSE +- 15 days after inauguration
+GeorgeWBush1.ftse.plot <- 
+  ggplot(GeorgeWBush1.ftse[which(GeorgeWBush1.ftse$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.ftse$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot G.W.Bush1 Nikkei +- 15 days after inauguration
+GeorgeWBush1.nikkei.plot <- 
+  ggplot(GeorgeWBush1.nikkei[which(GeorgeWBush1.nikkei$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.nikkei$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+# Plot G.W.Bush1 Hangseng +- 15 days after inauguration
+GeorgeWBush1.hangseng.plot <- 
+  ggplot(GeorgeWBush1.hangseng[which(GeorgeWBush1.hangseng$Date >= (GeorgeWBush1.Date - 15) & GeorgeWBush1.hangseng$Date <= (GeorgeWBush1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post G.W.Bush1 Inauguration") + geom_smooth(data=subset(GeorgeWBush1.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush1.Date), col = "black", size = 1, linetype=4)
+
+GeorgeWBush1.dowjones.plot
+GeorgeWBush1.snp500.plot
+GeorgeWBush1.nasdaq.plot
+GeorgeWBush1.nyse.plot
+
+GeorgeWBush1.ftse.plot
+GeorgeWBush1.hangseng.plot
+GeorgeWBush1.nikkei.plot
+
+# All Gradient Changes
+GeorgeWBush1.GradChangeVec <- c(GeorgeWBush1.dowjonesGradChange15, 
+                                 GeorgeWBush1.snp500GradChange15,
+                                 GeorgeWBush1.nasdaqGradChange15,
+                                 GeorgeWBush1.nyseGradChange15,
+                                 GeorgeWBush1.ftseGradChange15,
+                                 GeorgeWBush1.hangsengGradChange15,
+                                 GeorgeWBush1.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+GeorgeWBush1.GradChangeDF <- data.frame(President = c("GeorgeWBush-1", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(GeorgeWBush1.GradChangeVec))
+
+
+formattable(GeorgeWBush1.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "GeorgeWBush-1", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for G.W.Bush2
+GeorgeWBush2.Date <- speeches_date$Date[which(speeches_date$NameTerm == "GeorgeWBush-2")]
+GeorgeWBush2.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "GeorgeWBush-2")]
+GeorgeWBush2.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "GeorgeWBush-2")]
+
+GeorgeWBush2.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "GeorgeWBush-2")]
+GeorgeWBush2.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "GeorgeWBush-2")]
+
+# Subsetting stock index data to period relevant for Bush2
+GeorgeWBush2.dowjones <- subset(dowjones, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.dowjones$Group <- GeorgeWBush2.dowjones$Date >= GeorgeWBush2.Date
+
+GeorgeWBush2.snp500 <- subset(snp500, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.snp500$Group <- GeorgeWBush2.snp500$Date >= GeorgeWBush2.Date
+
+GeorgeWBush2.nasdaq <- subset(nasdaq, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.nasdaq$Group <- GeorgeWBush2.nasdaq$Date >= GeorgeWBush2.Date
+
+GeorgeWBush2.nyse <- subset(nyse, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.nyse$Group <- GeorgeWBush2.nyse$Date >= GeorgeWBush2.Date
+
+GeorgeWBush2.ftse <- subset(ftse, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.ftse$Group <- GeorgeWBush2.ftse$Date >= GeorgeWBush2.Date
+
+GeorgeWBush2.nikkei <- subset(nikkei, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.nikkei$Group <- GeorgeWBush2.nikkei$Date >= GeorgeWBush2.Date
+
+GeorgeWBush2.hangseng <- subset(hangseng, Date >= GeorgeWBush2.DateMinus15 & Date <= GeorgeWBush2.DatePlus15)
+GeorgeWBush2.hangseng$Group <- GeorgeWBush2.hangseng$Date >= GeorgeWBush2.Date
+
+# Calculate DJIA gradient
+GeorgeWBush2.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.dowjones, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.dowjones, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.dowjonesGradChange15 <- (coef(GeorgeWBush2.dowjonesPostGrad15)["Date"] - coef(GeorgeWBush2.dowjonesPreGrad15)["Date"])/abs(coef(GeorgeWBush2.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+GeorgeWBush2.snp500PreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.snp500, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.snp500PostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.snp500, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.snp500GradChange15 <- (coef(GeorgeWBush2.snp500PostGrad15)["Date"] - coef(GeorgeWBush2.snp500PreGrad15)["Date"])/abs(coef(GeorgeWBush2.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+GeorgeWBush2.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.nasdaq, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.nasdaq, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.nasdaqGradChange15 <- (coef(GeorgeWBush2.nasdaqPostGrad15)["Date"] - coef(GeorgeWBush2.nasdaqPreGrad15)["Date"])/abs(coef(GeorgeWBush2.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+GeorgeWBush2.nysePreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.nyse, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.nysePostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.nyse, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.nyseGradChange15 <- (coef(GeorgeWBush2.nysePostGrad15)["Date"] - coef(GeorgeWBush2.nysePreGrad15)["Date"])/abs(coef(GeorgeWBush2.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+GeorgeWBush2.ftsePreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.ftse, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.ftsePostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.ftse, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.ftseGradChange15 <- (coef(GeorgeWBush2.ftsePostGrad15)["Date"] - coef(GeorgeWBush2.ftsePreGrad15)["Date"])/abs(coef(GeorgeWBush2.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+GeorgeWBush2.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.hangseng, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.hangseng, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.hangsengGradChange15 <- (coef(GeorgeWBush2.hangsengPostGrad15)["Date"] - coef(GeorgeWBush2.hangsengPreGrad15)["Date"])/abs(coef(GeorgeWBush2.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+GeorgeWBush2.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.nikkei, Date >= GeorgeWBush2.DateMinus15 & Date < GeorgeWBush2.Date))
+GeorgeWBush2.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(GeorgeWBush2.nikkei, Date >= GeorgeWBush2.Date & Date <= GeorgeWBush2.DatePlus15))
+
+GeorgeWBush2.nikkeiGradChange15 <- (coef(GeorgeWBush2.nikkeiPostGrad15)["Date"] - coef(GeorgeWBush2.nikkeiPreGrad15)["Date"])/abs(coef(GeorgeWBush2.nikkeiPreGrad15)["Date"])
+
+# Plot Bush2 DJIA +- 15 days after inauguration
+GeorgeWBush2.dowjones.plot <- 
+  ggplot(GeorgeWBush2.dowjones[which(GeorgeWBush2.dowjones$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.dowjones$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush2 SNP500 +- 15 days after inauguration
+GeorgeWBush2.snp500.plot <- 
+  ggplot(GeorgeWBush2.snp500[which(GeorgeWBush2.snp500$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.snp500$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush2 nasdaq +- 15 days after inauguration
+GeorgeWBush2.nasdaq.plot <- 
+  ggplot(GeorgeWBush2.nasdaq[which(GeorgeWBush2.nasdaq$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.nasdaq$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush2 NYSE +- 15 days after inauguration
+GeorgeWBush2.nyse.plot <- 
+  ggplot(GeorgeWBush2.nyse[which(GeorgeWBush2.nyse$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.nyse$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush2 FTSE +- 15 days after inauguration
+GeorgeWBush2.ftse.plot <- 
+  ggplot(GeorgeWBush2.ftse[which(GeorgeWBush2.ftse$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.ftse$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush2 Nikkei +- 15 days after inauguration
+GeorgeWBush2.nikkei.plot <- 
+  ggplot(GeorgeWBush2.nikkei[which(GeorgeWBush2.nikkei$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.nikkei$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+# Plot Bush2 Hangseng +- 15 days after inauguration
+GeorgeWBush2.hangseng.plot <- 
+  ggplot(GeorgeWBush2.hangseng[which(GeorgeWBush2.hangseng$Date >= (GeorgeWBush2.Date - 15) & GeorgeWBush2.hangseng$Date <= (GeorgeWBush2.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Bush2 Inauguration") + geom_smooth(data=subset(GeorgeWBush2.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(GeorgeWBush2.Date), col = "black", size = 1, linetype=4)
+
+GeorgeWBush2.dowjones.plot
+GeorgeWBush2.snp500.plot
+GeorgeWBush2.nasdaq.plot
+GeorgeWBush2.nyse.plot
+
+GeorgeWBush2.ftse.plot
+GeorgeWBush2.hangseng.plot
+GeorgeWBush2.nikkei.plot
+
+# All Gradient Changes
+GeorgeWBush2.GradChangeVec <- c(GeorgeWBush2.dowjonesGradChange15, 
+                                 GeorgeWBush2.snp500GradChange15,
+                                 GeorgeWBush2.nasdaqGradChange15,
+                                 GeorgeWBush2.nyseGradChange15,
+                                 GeorgeWBush2.ftseGradChange15,
+                                 GeorgeWBush2.hangsengGradChange15,
+                                 GeorgeWBush2.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+GeorgeWBush2.GradChangeDF <- data.frame(President = c("GeorgeWBush-2", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(GeorgeWBush2.GradChangeVec))
+
+
+formattable(GeorgeWBush2.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "GeorgeWBush-2", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+```
+
+```{r, echo = F}
+# Abstracting relevant dates for Obama1
+BarackObama1.Date <- speeches_date$Date[which(speeches_date$NameTerm == "BarackObama-1")]
+BarackObama1.DateMinus15 <- speeches_date$DateMinus15[which(speeches_date$NameTerm == "BarackObama-1")]
+BarackObama1.DatePlus15 <- 
+  speeches_date$DatePlus15[which(speeches_date$NameTerm == "BarackObama-1")]
+
+BarackObama1.DateMinus7 <- speeches_date$DateMinus7[which(speeches_date$NameTerm == "BarackObama-1")]
+BarackObama1.DatePlus7 <- 
+  speeches_date$DatePlus7[which(speeches_date$NameTerm == "BarackObama-1")]
+
+# Subsetting stock index data to period relevant for Obama1
+BarackObama1.dowjones <- subset(dowjones, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.dowjones$Group <- BarackObama1.dowjones$Date >= BarackObama1.Date
+
+BarackObama1.snp500 <- subset(snp500, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.snp500$Group <- BarackObama1.snp500$Date >= BarackObama1.Date
+
+BarackObama1.nasdaq <- subset(nasdaq, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.nasdaq$Group <- BarackObama1.nasdaq$Date >= BarackObama1.Date
+
+BarackObama1.nyse <- subset(nyse, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.nyse$Group <- BarackObama1.nyse$Date >= BarackObama1.Date
+
+BarackObama1.ftse <- subset(ftse, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.ftse$Group <- BarackObama1.ftse$Date >= BarackObama1.Date
+
+BarackObama1.nikkei <- subset(nikkei, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.nikkei$Group <- BarackObama1.nikkei$Date >= BarackObama1.Date
+
+BarackObama1.hangseng <- subset(hangseng, Date >= BarackObama1.DateMinus15 & Date <= BarackObama1.DatePlus15)
+BarackObama1.hangseng$Group <- BarackObama1.hangseng$Date >= BarackObama1.Date
+
+# Calculate DJIA gradient
+BarackObama1.dowjonesPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.dowjones, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.dowjonesPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.dowjones, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.dowjonesGradChange15 <- (coef(BarackObama1.dowjonesPostGrad15)["Date"] - coef(BarackObama1.dowjonesPreGrad15)["Date"])/abs(coef(BarackObama1.dowjonesPreGrad15)["Date"])
+
+# Calculate S&P500 gradient
+BarackObama1.snp500PreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.snp500, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.snp500PostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.snp500, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.snp500GradChange15 <- (coef(BarackObama1.snp500PostGrad15)["Date"] - coef(BarackObama1.snp500PreGrad15)["Date"])/abs(coef(BarackObama1.snp500PreGrad15)["Date"])
+
+# Calculate Nasdaq gradient
+BarackObama1.nasdaqPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.nasdaq, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.nasdaqPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.nasdaq, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.nasdaqGradChange15 <- (coef(BarackObama1.nasdaqPostGrad15)["Date"] - coef(BarackObama1.nasdaqPreGrad15)["Date"])/abs(coef(BarackObama1.nasdaqPreGrad15)["Date"])
+
+# Calculate NYSE gradient
+BarackObama1.nysePreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.nyse, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.nysePostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.nyse, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.nyseGradChange15 <- (coef(BarackObama1.nysePostGrad15)["Date"] - coef(BarackObama1.nysePreGrad15)["Date"])/abs(coef(BarackObama1.nysePreGrad15)["Date"])
+
+# Calculate FTSE gradient
+BarackObama1.ftsePreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.ftse, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.ftsePostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.ftse, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.ftseGradChange15 <- (coef(BarackObama1.ftsePostGrad15)["Date"] - coef(BarackObama1.ftsePreGrad15)["Date"])/abs(coef(BarackObama1.ftsePreGrad15)["Date"])
+
+# Calculate Hang Seng gradient
+BarackObama1.hangsengPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.hangseng, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.hangsengPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.hangseng, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.hangsengGradChange15 <- (coef(BarackObama1.hangsengPostGrad15)["Date"] - coef(BarackObama1.hangsengPreGrad15)["Date"])/abs(coef(BarackObama1.hangsengPreGrad15)["Date"])
+
+# Calculate Nikkei gradient
+BarackObama1.nikkeiPreGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.nikkei, Date >= BarackObama1.DateMinus15 & Date < BarackObama1.Date))
+BarackObama1.nikkeiPostGrad15 <- lm(Close ~ Date, data = subset(BarackObama1.nikkei, Date >= BarackObama1.Date & Date <= BarackObama1.DatePlus15))
+
+BarackObama1.nikkeiGradChange15 <- (coef(BarackObama1.nikkeiPostGrad15)["Date"] - coef(BarackObama1.nikkeiPreGrad15)["Date"])/abs(coef(BarackObama1.nikkeiPreGrad15)["Date"])
+
+# Plot Obama1 DJIA +- 15 days after inauguration
+BarackObama1.dowjones.plot <- 
+  ggplot(BarackObama1.dowjones[which(BarackObama1.dowjones$Date >= (BarackObama1.Date - 15) & BarackObama1.dowjones$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("DJIA pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.dowjones, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama1 SNP500 +- 15 days after inauguration
+BarackObama1.snp500.plot <- 
+  ggplot(BarackObama1.snp500[which(BarackObama1.snp500$Date >= (BarackObama1.Date - 15) & BarackObama1.snp500$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("S&P500 pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.snp500, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama1 nasdaq +- 15 days after inauguration
+BarackObama1.nasdaq.plot <- 
+  ggplot(BarackObama1.nasdaq[which(BarackObama1.nasdaq$Date >= (BarackObama1.Date - 15) & BarackObama1.nasdaq$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nasdaq pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.nasdaq, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama1 NYSE +- 15 days after inauguration
+BarackObama1.nyse.plot <- 
+  ggplot(BarackObama1.nyse[which(BarackObama1.nyse$Date >= (BarackObama1.Date - 15) & BarackObama1.nyse$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("NYSE pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.nyse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama1 FTSE +- 15 days after inauguration
+BarackObama1.ftse.plot <- 
+  ggplot(BarackObama1.ftse[which(BarackObama1.ftse$Date >= (BarackObama1.Date - 15) & BarackObama1.ftse$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("FTSE pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.ftse, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama1 Nikkei +- 15 days after inauguration
+BarackObama1.nikkei.plot <- 
+  ggplot(BarackObama1.nikkei[which(BarackObama1.nikkei$Date >= (BarackObama1.Date - 15) & BarackObama1.nikkei$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Nikkei pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.nikkei, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+# Plot Obama1 Hangseng +- 15 days after inauguration
+BarackObama1.hangseng.plot <- 
+  ggplot(BarackObama1.hangseng[which(BarackObama1.hangseng$Date >= (BarackObama1.Date - 15) & BarackObama1.hangseng$Date <= (BarackObama1.Date + 15)),], aes(x = Date, y = Close)) +
+  geom_point(size = 4, aes(color = Group)) +
+  ylab("Closing Price") +
+  ggtitle("Hangseng pre/post Obama1 Inauguration") + geom_smooth(data=subset(BarackObama1.hangseng, Group==0 | Group==1), aes(x = Date, y = Close, color=factor(Group)), method=lm, se=FALSE) +
+  scale_x_date(date_breaks = "3 days", date_minor_breaks = "1 day", date_labels = "%b%d") + 
+  theme(legend.position="none", plot.title = element_text(hjust = .5, size = 20), 
+        axis.text.x = element_text(colour="grey20",size=11,angle=0,hjust=.5,vjust=.5,face="plain"),
+        axis.text.y = element_text(colour="grey20",size=14,angle=0,hjust=1,vjust=0,face="plain"),  
+        axis.title.x = element_text(colour="grey20",size=16,angle=0,hjust=.5,vjust=0,face="plain"),
+        axis.title.y = element_text(colour="grey20",size=16,angle=90,hjust=.5,vjust=.5,face="plain")) +
+  geom_vline(xintercept = as.numeric(BarackObama1.Date), col = "black", size = 1, linetype=4)
+
+BarackObama1.dowjones.plot
+BarackObama1.snp500.plot
+BarackObama1.nasdaq.plot
+BarackObama1.nyse.plot
+
+BarackObama1.ftse.plot
+BarackObama1.hangseng.plot
+BarackObama1.nikkei.plot
+
+# All Gradient Changes
+BarackObama1.GradChangeVec <- c(BarackObama1.dowjonesGradChange15, 
+                                 BarackObama1.snp500GradChange15,
+                                 BarackObama1.nasdaqGradChange15,
+                                 BarackObama1.nyseGradChange15,
+                                 BarackObama1.ftseGradChange15,
+                                 BarackObama1.hangsengGradChange15,
+                                 BarackObama1.nikkeiGradChange15)
+IndicesNames <- c("Dow Jones", "S&P500", "Nasdaq", "NYSE",
+                  "FTSE", "Hang Seng", "Nikkei")
+
+BarackObama1.GradChangeDF <- data.frame(President = c("BarackObama-1", "", "", "", "", "", ""), 
+                                         id = 1:7,
+                                         Index = IndicesNames,
+                                         GradChange = percent(BarackObama1.GradChangeVec))
+
+
+formattable(BarackObama1.GradChangeDF, align = "c", list(
+  President=formatter(
+    "span",
+    style = x ~ ifelse(x == "BarackObama-1", 
+                       style(font.weight = "bold"), NA)),
+  GradChange = formatter(
+    "span",
+    style = x ~ style(color = ifelse(x < 0 , "red", "green")),
+    x ~ icontext(ifelse(x < 0, "arrow-down", "arrow-up"), x)))
+)
+```
+
+
+***
+### Text Analysis - Diction (Word Clouds)
+
+We now begin our text analysis section. In this section, we will conduct 3 kinds of analysis - the diction used, the sentence structure (in this case, length of sentence), and the emotions behind the words used. Firstly, we start off with a word cloud of individual presidents in each cluster. 
+```{r}
+shinyApp(
+    ui = fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+        column(4, selectInput('speech1', 'Speeches (Mkts Up)',
+                              speeches_up,
+                              selected=speeches_shortened[1])),
+        column(4, selectInput('speech2', 'Speeches (Mkts Down)', speeches_down,
+                              selected=speeches_shortened[3])),
+        column(4, sliderInput('nwords', 'Number of words', 3,
+                               min = 20, max = 200, value=100, step = 20))
+      ),
+      fluidRow(
+        plotOutput('wordclouds', height = "400px")
+      )
+    ),
+
+    server = function(input, output, session) {
+
+      # Combine the selected variables into a new data frame
+      selectedData <- reactive({
+        list(dtm.term1=SpeechCorpus.dtm$term[SpeechCorpus.dtm$document==as.character(input$speech1)],
+             dtm.count1=SpeechCorpus.dtm$count[SpeechCorpus.dtm$document==as.character(input$speech1)],
+             dtm.term2=SpeechCorpus.dtm$term[SpeechCorpus.dtm$document==as.character(input$speech2)],
+             dtm.count2=SpeechCorpus.dtm$count[SpeechCorpus.dtm$document==as.character(input$speech2)])
+      })
+
+      output$wordclouds <- renderPlot(height = 400, {
+        par(mfrow=c(1,2), mar = c(0, 0, 3, 0))
+        wordcloud(selectedData()$dtm.term1, 
+                  selectedData()$dtm.count1,
+              scale=c(4,0.5),
+              max.words=input$nwords,
+              min.freq=1,
+              random.order=FALSE,
+              rot.per=0,
+              use.r.layout=FALSE,
+              random.color=FALSE,
+              colors=brewer.pal(9,"Greens"), 
+            main=input$speech1)
+        wordcloud(selectedData()$dtm.term2, 
+                  selectedData()$dtm.count2,
+              scale=c(4,0.5),
+              max.words=input$nwords,
+              min.freq=1,
+              random.order=FALSE,
+              rot.per=0,
+              use.r.layout=FALSE,
+              random.color=FALSE,
+              colors=brewer.pal(9,"Reds"), 
+            main=input$speech2)
+      })
+    },
+
+    options = list(height = 600)
+)
+```
+
+
+#### Interactive word cloud by Up/Down (by count)
+
+Next, I built an interactive word cloud of the 2 cluster of speeches (marketing lifting vs marketing dampening). The first word cloud is based on the count of words in the speeches. Interestingly, we see that there is not much of a difference between both clusters of speeches. Evidently, the types of words used in all inauguration speeches are similar to a large extent.
+
+```{r, echo = F}
+shinyApp(
+    ui = fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+        column(4, selectInput('speech1', 'Speeches (Mkts Up)',
+                              "Combined Speeches (Up)",
+                              selected=speeches_shortened[1])),
+        column(4, selectInput('speech1', 'Speeches (Mkts Down)',
+                              "Combined Speeches (Down)",
+                              selected=speeches_shortened[1])),
+        column(4, sliderInput('nwords', 'Number of words', 3,
+                               min = 20, max = 200, value=100, step = 20))
+      ),
+      fluidRow(
+        plotOutput('wordclouds', height = "400px")
+      )
+    ),
+
+    server = function(input, output, session) {
+
+      output$wordclouds <- renderPlot(height = 400, {
+        par(mfrow=c(1,2), mar = c(0, 0, 3, 0))
+        wordcloud(tdm.overall.up$term, 
+                  tdm.overall.up$`sum(count)`,
+              scale=c(4,0.5),
+              max.words=input$nwords,
+              min.freq=1,
+              random.order=FALSE,
+              rot.per=0,
+              use.r.layout=FALSE,
+              random.color=FALSE,
+              colors=brewer.pal(9,"Greens"))
+        wordcloud(tdm.overall.down$term, 
+                  tdm.overall.down$`sum(count)`,
+              scale=c(4,0.5),
+              max.words=input$nwords,
+              min.freq=1,
+              random.order=FALSE,
+              rot.per=0,
+              use.r.layout=FALSE,
+              random.color=FALSE,
+              colors=brewer.pal(9,"Reds"))
+      })
+    },
+
+    options = list(height = 600)
+)
+```
+
+
+#### Interactive word cloud by Up/Down (by TF-IDF)
+
+The last word cloud built was based on a weighing of words using TF-IDF. This means we are not looking purely at the count of words, but also how rare the word is used in that particular speech. From this word cloud, we see some patterns: the market dampening cluster of speeches tend to have more negative words showing prominently. Another interesting factor is that all "market dampening" speeches are made by second term presidents.
+```{r, echo = F}
+shinyApp(
+    ui = fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+        column(4, selectInput('speech1', 'Speeches (Mkts Up)',
+                              "Combined Speeches (Up)",
+                              selected=speeches_shortened[1])),
+        column(4, selectInput('speech1', 'Speeches (Mkts Down)',
+                              "Combined Speeches (Down)",
+                              selected=speeches_shortened[1])),
+        column(4, sliderInput('nwords', 'Number of words', 3,
+                               min = 20, max = 200, value=100, step = 20))
+      ),
+      fluidRow(
+        plotOutput('wordclouds', height = "400px")
+      )
+    ),
+
+    server = function(input, output, session) {
+
+      output$wordclouds <- renderPlot(height = 400, {
+        par(mfrow=c(1,2), mar = c(0, 0, 3, 0))
+        wordcloud(SpeechCorpus.dtm.up$term, 
+                  SpeechCorpus.dtm.up$count,
+              scale=c(4,0.5),
+              max.words=input$nwords,
+              min.freq=1,
+              random.order=FALSE,
+              rot.per=0,
+              use.r.layout=FALSE,
+              random.color=FALSE,
+              colors=brewer.pal(9,"Greens"))
+        wordcloud(SpeechCorpus.dtm.down$term, 
+                  SpeechCorpus.dtm.down$count,
+              scale=c(4,0.5),
+              max.words=input$nwords,
+              min.freq=1,
+              random.order=FALSE,
+              rot.per=0,
+              use.r.layout=FALSE,
+              random.color=FALSE,
+              colors=brewer.pal(9,"Reds"))
+      })
+    },
+
+    options = list(height = 600)
+)
+```
+
+
+### Text Analysis - Length of Sentence
+Following the example in class on analysis by length of sentence, we did a comparison between the clusters of speeches. The results were counterintuitive - speech experts always advocate for shorter sentences for maximum clarity and impact, but in this case, we see that on average the speeches which result in market prices improving have longer sentences. This is worth further research.
+
+```{r, message=FALSE, warning=FALSE}
+# for speeches (up)
+sentence.up.list=data.frame()
+for(i in 1:nrow(speech_up)){
+  sentences=sent_detect(speech_up$fulltext[i],
+                        endmarks = c("?", ".", "!", "|",";"))
+  if(length(sentences)>0){
+    emotions=get_nrc_sentiment(sentences)
+    word.count=word_count(sentences)
+    # colnames(emotions)=paste0("emo.", colnames(emotions))
+    # in case the word counts are zeros?
+    emotions=diag(1/(word.count+0.01))%*%as.matrix(emotions)
+    sentence.up.list=rbind(sentence.up.list, 
+                        cbind(speech_up[i,-ncol(speech_up)],
+                              sentences=as.character(sentences), 
+                              word.count,
+                              emotions,
+                              sent.id=1:length(sentences)
+                              )
+    )
+  }
+}
+
+# clean non-existent sentence
+sentence.up.list=
+  sentence.up.list%>%
+  filter(!is.na(word.count) & (word.count != 1))
+
+#######
+
+# for speeches(down)
+sentence.down.list=data.frame()
+for(i in 1:nrow(speech_down)){
+  sentences=sent_detect(speech_down$fulltext[i],
+                        endmarks = c("?", ".", "!", "|",";"))
+  if(length(sentences)>0){
+    emotions=get_nrc_sentiment(sentences)
+    word.count=word_count(sentences)
+    # colnames(emotions)=paste0("emo.", colnames(emotions))
+    # in case the word counts are zeros?
+    emotions=diag(1/(word.count+0.01))%*%as.matrix(emotions)
+    sentence.down.list=rbind(sentence.down.list, 
+                        cbind(speech_down[i,-ncol(speech_down)],
+                              sentences=as.character(sentences), 
+                              word.count,
+                              emotions,
+                              sent.id=1:length(sentences)
+                              )
+    )
+  }
+}
+
+# clean non-existent sentence
+sentence.down.list=
+  sentence.down.list%>%
+  filter(!is.na(word.count) & (word.count != 1))
+
+###### 
+
+# compare length of speech clusters
+par(mar=c(4, 11, 2, 2))
+
+#sel.comparison=levels(sentence.list$FileOrdered)
+sentence.up.list.length <- sentence.up.list
+levels(sentence.up.list.length$V1) <- c("Obama1", "Trump1", "G.Bush1", "G.W.Bush1", "Clinton1")
+#sentence.up.list.length$V1= as.factor(sentence.up.list.length$V1)
+sentence.up.list.length$word.count = as.numeric(sentence.up.list.length$word.count)
+
+
+sentence.up.list.length$FileOrdered=reorder(sentence.up.list.length$V1, 
+                                  sentence.up.list.length$word.count, 
+                                  mean, 
+                                  order=T)
+
+beeswarm(word.count~FileOrdered, 
+         data=sentence.up.list.length,
+         horizontal = TRUE, 
+         pch=16, col=alpha(brewer.pal(9, "Set1"), 0.6), 
+         cex=0.7, cex.axis=0.8, cex.lab=1,
+         spacing=1.2/nlevels(sentence.up.list.length$FileOrdered),
+         las=2, xlab="Number of words in a sentence.", ylab= "",
+         main="Inauguration Speeches (Up)")
+
+```
+
+```{r, echo = F}
+par(mar=c(4, 11, 2, 2))
+
+#sel.comparison=levels(sentence.list$FileOrdered)
+sentence.down.list.length <- sentence.down.list
+levels(sentence.down.list.length$V1) <- c("Obama2", "G.W.Bush2", "Reagan2", "Clinton2")
+sentence.down.list.length$word.count = as.numeric(sentence.down.list.length$word.count)
+
+
+sentence.down.list.length$FileOrdered=reorder(sentence.down.list.length$V1, 
+                                  sentence.down.list.length$word.count, 
+                                  mean, 
+                                  order=T)
+
+beeswarm(word.count~FileOrdered, 
+         data=sentence.down.list.length,
+         horizontal = TRUE, 
+         pch=16, col=alpha(brewer.pal(9, "Set1"), 0.6), 
+         cex=0.7, cex.axis=0.8, cex.lab=1,
+         spacing=1.2/nlevels(sentence.down.list.length$FileOrdered),
+         las=2, xlab="Number of words in a sentence.", ylab= "",
+         main="Inauguration Speeches (down)")
+
+
+```
+
+### Text Analysis - Sentiment Analysis
+
+Finally, on sentiment analysis. We look at the feelings evoked by the words used by the president. In this case, I clustered all the speeches in each cluster (market dampening vs marketing lifting) and also rearranged the sentences by the "top emotion" evoked. Interestingly, there is a larger proportion of negative and angry feelings in the market lifting speeches. Maybe this corroborates with how President Trump's speech has such a positive impact on the market.
+
+```{r}
+# Speeches (up)
+sentence.up.sentiment <- sentence.up.list
+colnames(sentence.up.sentiment)[1] <- "Speeches"
+sentence.up.sentiment$Speeches <- "Speeches (Up)"
+sentence.up.sentiment$topemotionSort=apply(select(sentence.up.sentiment, 
+                                        anger:positive), 
+                                 1, which.max)
+sentence.up.sentiment <- sentence.up.sentiment[order(sentence.up.sentiment$topemotionSort),]
+sentence.up.sentiment$sent.id2 <- sentence.up.sentiment$sent.id
+sentence.up.sentiment$sent.id <- 1:nrow(sentence.up.sentiment)
+
+
+for (i in 3:ncol(sentence.up.sentiment)) {
+  sentence.up.sentiment[, i] <- as.numeric(as.character(sentence.up.sentiment[, i]))
+}
+
+
+# Speeches (down)
+sentence.down.sentiment <- sentence.down.list
+colnames(sentence.down.sentiment)[1] <- "Speeches"
+sentence.down.sentiment$Speeches <- "Speeches (down)"
+sentence.down.sentiment$topemotionSort=apply(select(sentence.down.sentiment, 
+                                        anger:positive), 
+                                 1, which.max)
+sentence.down.sentiment <- sentence.down.sentiment[order(sentence.down.sentiment$topemotionSort),]
+sentence.down.sentiment$sent.id2 <- sentence.down.sentiment$sent.id
+sentence.down.sentiment$sent.id <- 1:nrow(sentence.down.sentiment)
+
+
+for (i in 3:ncol(sentence.down.sentiment)) {
+  sentence.down.sentiment[, i] <- as.numeric(as.character(sentence.down.sentiment[, i]))
+}
+
+par(mfrow=c(2,1), mar=c(1,0,2,0), bty="n", xaxt="n", yaxt="n", font.main=1)
+f.plotsent.len(In.list=sentence.up.sentiment, NameTerm="Speeches (Up)")
+f.plotsent.len(In.list=sentence.down.sentiment, NameTerm="Speeches (Down)")
+
+```
+
