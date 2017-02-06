@@ -15,12 +15,12 @@
 + Using a quantifiable metric, the stock market indices, I tried to measure people’s reaction to what was said by the various presidents in the form of closing price. By tracking the stock prices of the various indices before and after the inaugurations from 1985, we classify speeches which are considered market friendly or not. Subsequently, we conduct 3 types of text analysis (on diction, sentence length and sentiment) to try pick out things which “the markets like to hear”.
 
 + Some (interesting) findings:
-++ 1. Market indices unambiguously react to inauguration speeches.
-++ 2. Interestingly, Asian markets didn't react negatively to Trump's speech. Instead, the UK's did.
-++ 3. All speeches which were found to have market dampening effects were second-term speeches.
-++ 4. Word clouds (by count of words) are similar between market lifting/dampening speeches. However, word clouds (ordered by TF-IDF) showed differences: market dampening speeches featured more pragmatic words used ("federal, system, senator, requires") whereas marketing lifting speeches were more abstract ("dreams, story, change").
-++ 5. Counterintuitively, market lifting speeches had longer than average sentences - differing from speech experts' recommendations
-++ 6. Market lifting speeches also had a larger proportion of sentences with negative and angry sentiments. It also had a much larger amount of envy inducing sentences.
+  1. Market indices unambiguously react to inauguration speeches.
+  2. Interestingly, Asian markets didn't react negatively to Trump's speech. Instead, the UK's did.
+  3. All speeches which were found to have market dampening effects were second-term speeches.
+  4. Word clouds (by count of words) are similar between market lifting/dampening speeches. However, word clouds (ordered by TF-IDF) showed differences: market dampening speeches featured more pragmatic words used ("federal, system, senator, requires") whereas marketing lifting speeches were more abstract ("dreams, story, change").
+  5. Counterintuitively, market lifting speeches had longer than average sentences - differing from speech experts' recommendations
+  6. Market lifting speeches also had a larger proportion of sentences with negative and angry sentiments. It also had a much larger amount of envy inducing sentences.
 
 
 
